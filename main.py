@@ -33,7 +33,10 @@ async def log_requests(request: Request, call_next):
     logger.info(f"Response {response.status_code} for {request.url}")
     return response
 
-@app.get("/kaithhealthcheck")
+@app.get("/kaithheathcheck")
+async def healthcheck():
+    return {"status": "ok"}
+@app.get("/kaithhealthcheck") 
 async def healthcheck():
     return {"status": "ok"}
 app.include_router(router,tags=["A2A Weather Agent"])
