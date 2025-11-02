@@ -177,6 +177,8 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 for sub in (msg.get("content"), msg.get("text"), msg.get("message"), msg.get("body")):
                     if isinstance(sub, str) and sub:
                         candidates.append(sub)
+            elif isinstance(msg,str):
+                candidates.append(msg)
 
             # Other common fields seen in A2A payloads
             for key in ("input", "text", "query", "body", "data", "event"):
