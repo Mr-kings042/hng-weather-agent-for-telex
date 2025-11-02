@@ -2,6 +2,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, Optional
 import json
+import os
+import re
+import difflib
+import httpx
+from dotenv import load_dotenv
+
 
 from models import JSONRPCRequest, JSONRPCResponse
 from services import (
@@ -15,7 +21,7 @@ from logger import logger
 
 router = APIRouter()
 
-
+load_dotenv()
 # JSON-RPC 2.0 Error Codes
 class JSONRPCError:
     PARSE_ERROR = -32700
@@ -212,7 +218,8 @@ async def weather_rest_endpoint(request: Request):
                 error={"code": JSONRPCError.METHOD_NOT_FOUND, "message": f"Method '{raw_method}' not supported on this endpoint"}
             )
             return JSONResponse(status_code=400, content=resp.model_dump())
-
+        if city:
+            city = await resolve_city_name(city)
         logger.debug(f"Resolved city: {city!r}")
         if not city:
             resp = JSONRPCResponse(
@@ -293,40 +300,151 @@ async def weather_batch_endpoint(cities: list[str]):
 # ============================================================================
 
 
+GEO_URL = os.getenv("GEO_URL")
+STOPWORDS = {
+    "hi", "hello", "hey", "please", "thanks", "thank", "ok", "okay", "help",
+    "the", "a", "an", "is", "it", "what", "whats", "what's", "how", "hows", "how's",
+    "weather", "forecast", "temperature", "in", "at", "for", "on", "about", "tell", "me"
+           }
+ABBREVIATIONS = {
+    "nyc": "New York City",
+    "la": "Los Angeles",
+    "sf": "San Francisco",
+    "ph": "Port Harcourt",
+    "phc": "Port Harcourt",
+    "vegas": "Las Vegas",
+    "dc": "Washington",
+    "d.c.": "Washington",
+    "uk": "London",          
+    "uae": "Dubai",          
+    "eko": "Lagos",       
+           }
+    # A small curated list for fuzzy fallback (expand as needed)
+COMMON_CITIES = {
+    "Lagos", "Abuja", "Kano", "Kaduna", "Ibadan", "Port Harcourt", "Enugu",
+    "London", "Paris", "Berlin", "Madrid", "Rome", "Amsterdam", "Dublin",
+    "New York", "New York City", "Los Angeles", "San Francisco", "Seattle",
+    "Chicago", "Houston", "Miami", "Boston", "Washington", "Toronto",
+    "Vancouver", "Montreal", "Mexico City", "Rio de Janeiro", "Sao Paulo",
+    "Cairo", "Nairobi", "Johannesburg", "Accra", "Kigali", "Addis Ababa",
+    "Dubai", "Abu Dhabi", "Doha", "Istanbul", "Mumbai", "Delhi", "Bengaluru",
+    "Tokyo", "Osaka", "Seoul", "Beijing", "Shanghai", "Singapore", "Sydney",
+    "Melbourne", "Auckland", "Cape Town", "Lisbon", "Zurich", "Stockholm"
+           }
+
+def _title_case(name: str) -> str:
+    return " ".join(w.capitalize() for w in name.split())
+
+def _maybe_from_abbr(token: str) -> Optional[str]:
+    k = token.lower().strip(". ")
+    return ABBREVIATIONS.get(k)
+
+def _fuzzy_city(token: str, cutoff: float = 0.85) -> Optional[str]:
+    # difflib ratio in [0,1]; get_close_matches uses 0..1 internally
+    candidates = list(COMMON_CITIES) + list(ABBREVIATIONS.values())
+    matches = difflib.get_close_matches(_title_case(token), candidates, n=1, cutoff=cutoff)
+    return matches[0] if matches else None
+
 def extract_city_from_message(message: str) -> Optional[str]:
-    import re
+    """
+    Heuristic extractor that:
+    - Parses common phrasings (with or without 'weather' keywords)
+    - Understands prompts like 'Tell me about Paris'
+    - Handles abbreviations (NYC -> New York City)
+    - Does lightweight typo correction via fuzzy match against COMMON_CITIES
+    """
     if not message:
         return None
     txt = message.strip()
     txt_lower = txt.lower()
 
-    # Looser patterns (match anywhere)
+    # 1) Explicit patterns (both weather and non-weather prompts)
     patterns = [
-        r"weather (?:in|at|for) ([a-zA-Z\s,]+)",
-        r"(?:what(?:'|’)s|whats|how(?:'|’)s)\s+(?:the\s+)?weather\s+(?:in|at|for)\s+([a-zA-Z\s,]+)",
-        r"forecast (?:in|at|for) ([a-zA-Z\s,]+)",
-        r"temperature (?:in|at|of) ([a-zA-Z\s,]+)",
+        r"(?:weather|forecast|temperature)\s+(?:in|at|for)\s+([a-zA-Z\s,]+)",
+        r"(?:what(?:'|’)s|whats|how(?:'|’)s)\s+(?:the\s+)?(?:weather|forecast)\s+(?:in|at|for)\s+([a-zA-Z\s,]+)",
+        r"(?:tell\s+me\s+about|about|regarding|info\s+on|information\s+on)\s+([a-zA-Z\s,]+)",
         r"(?:in|at|for)\s+([A-Za-z\s]{2,})$",
     ]
     for p in patterns:
         m = re.search(p, txt_lower)
         if m:
-            city = m.group(1).strip(" .?;!,")
-            return " ".join(w.capitalize() for w in city.split())
+            candidate = m.group(1).strip(" .?;!,")
+            # abbreviation?
+            ab = _maybe_from_abbr(candidate)
+            if ab:
+                return ab
+            # fuzzy fallback
+            fuzzy = _fuzzy_city(candidate)
+            if fuzzy:
+                return fuzzy
+            return _title_case(candidate)
 
-    # Short messages like "lagos" or "new york"
-    tokens = [t.strip(".,") for t in re.split(r"\s+", txt) if t.strip()]
-    if 1 <= len(tokens) <= 3 and all(t.replace(",", "").isalpha() for t in tokens):
-        return " ".join(w.capitalize() for w in tokens)
+    # 2) Single-word or 2-3 word tokens that look like a place (avoid stopwords)
+    tokens = [t.strip(".,!?") for t in re.split(r"\s+", txt) if t.strip()]
+    filtered = [t for t in tokens if t.lower() not in STOPWORDS]
+    if 1 <= len(filtered) <= 3 and all(t.replace(",", "").isalpha() for t in filtered):
+        candidate = " ".join(filtered)
+        ab = _maybe_from_abbr(candidate)
+        if ab:
+            return ab
+        fuzzy = _fuzzy_city(candidate)
+        if fuzzy:
+            return fuzzy
+        return _title_case(candidate)
 
-    # Capitalized location after preposition in original text
-    m = re.search(r"(?:in|at|for)\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*){0,2})", txt)
+    # 3) Capitalized sequence after a preposition in original cased text
+    m = re.search(r"(?:in|at|for|about)\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*){0,3})", txt)
     if m:
-        return m.group(1).strip()
+        candidate = m.group(1).strip()
+        ab = _maybe_from_abbr(candidate)
+        if ab:
+            return ab
+        fuzzy = _fuzzy_city(candidate)
+        if fuzzy:
+            return fuzzy
+        return _title_case(candidate)
 
     return None
 
+async def resolve_city_name(candidate: str) -> Optional[str]:
+    """
+    Resolve and standardize city names:
+    - Map abbreviations (NYC -> New York City)
+    - Fuzzy-correct common typos (lagoss -> Lagos)
+    - Validate/normalize via Open-Meteo geocoding API to return 'Name, Country'
+    """
+    if not candidate:
+        return None
 
+    # 1) Abbreviation map
+    ab = _maybe_from_abbr(candidate)
+    if ab:
+        candidate = ab
+
+    # 2) Fuzzy correction
+    fuzzy = _fuzzy_city(candidate)
+    if fuzzy:
+        candidate = fuzzy
+
+    # 3) Geocode to standardize (best effort)
+    geo_url = os.environ.get("GEO_URL", GEO_URL_DEFAULT)
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(geo_url, params={"name": candidate, "count": 1, "language": "en"})
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results") or []
+            if results:
+                loc = results[0]
+                name = loc.get("name") or candidate
+                country = loc.get("country")
+                # Return "Name, Country" if country available
+                return f"{name}, {country}" if country else name
+    except Exception:
+        # Swallow geocoding errors and fall back to best local guess
+        pass
+
+    return _title_case(candidate)
 
 def format_weather_response(data: Dict[str, Any]) -> str:
   
