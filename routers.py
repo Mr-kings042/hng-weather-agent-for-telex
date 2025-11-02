@@ -49,6 +49,7 @@ def create_error_response(
 # REST Endpoints (for testing and Telex.im integration)
 # ============================================================================
 
+
 @router.post("/a2a/weather")
 async def weather_rest_endpoint(request: Request):
     """
@@ -139,19 +140,39 @@ async def weather_rest_endpoint(request: Request):
         elif method in ("message.send", "execute"):
             candidates: list[str] = []
 
-            # Common top-level fields Telex/Mastra may use
-            for key in ("message", "input", "text", "query", "body", "data", "event"):
+            # Telex-style message with parts array
+            msg = params.get("message")
+            if isinstance(msg, dict):
+                parts = msg.get("parts") or []
+                if isinstance(parts, list):
+                    for p in parts:
+                        if not isinstance(p, dict):
+                            continue
+                        kind = p.get("kind")
+                        if kind == "text" and isinstance(p.get("text"), str):
+                            candidates.append(p["text"])
+                        elif kind == "data":
+                            pdata = p.get("data") or []
+                            if isinstance(pdata, list):
+                                for d in pdata:
+                                    if isinstance(d, dict) and d.get("kind") == "text" and isinstance(d.get("text"), str):
+                                        candidates.append(d["text"])
+                # fallback old-style fields
+                for sub in (msg.get("content"), msg.get("text"), msg.get("message"), msg.get("body")):
+                    if isinstance(sub, str) and sub:
+                        candidates.append(sub)
+
+            # Other common top-level fields
+            for key in ("input", "text", "query", "body", "data", "event"):
                 v = params.get(key)
-                if not v:
-                    continue
                 if isinstance(v, dict):
                     for sub in (v.get("content"), v.get("text"), v.get("message"), v.get("body")):
                         if isinstance(sub, str) and sub:
                             candidates.append(sub)
-                elif isinstance(v, str):
+                elif isinstance(v, str) and v:
                     candidates.append(v)
 
-            # messages list (for execute)
+            # messages list (execute)
             msgs = params.get("messages") or []
             if isinstance(msgs, list):
                 for m in msgs:
@@ -236,7 +257,6 @@ async def weather_rest_endpoint(request: Request):
         )
 
 
-
 @router.get("/weather/{city}")
 async def weather_get_endpoint(city: str):
     try:
@@ -272,32 +292,40 @@ async def weather_batch_endpoint(cities: list[str]):
 # Helper Functions
 # ============================================================================
 
+
 def extract_city_from_message(message: str) -> Optional[str]:
     import re
-    
-    message_lower = message.lower().strip()
-    
-    # Common patterns
+    if not message:
+        return None
+    txt = message.strip()
+    txt_lower = txt.lower()
+
+    # Looser patterns (match anywhere)
     patterns = [
-        r"weather (?:in|at|for) ([a-zA-Z\s]+?)[\?\.]?$",
-        r"(?:what\'?s?|how\'?s?) (?:the )?weather (?:in|at|for) ([a-zA-Z\s]+?)[\?\.]?$",
-        r"forecast (?:in|at|for) ([a-zA-Z\s]+?)[\?\.]?$",
-        r"temperature (?:in|at|of) ([a-zA-Z\s]+?)[\?\.]?$",
+        r"weather (?:in|at|for) ([a-zA-Z\s,]+)",
+        r"(?:what(?:'|’)s|whats|how(?:'|’)s)\s+(?:the\s+)?weather\s+(?:in|at|for)\s+([a-zA-Z\s,]+)",
+        r"forecast (?:in|at|for) ([a-zA-Z\s,]+)",
+        r"temperature (?:in|at|of) ([a-zA-Z\s,]+)",
+        r"(?:in|at|for)\s+([A-Za-z\s]{2,})$",
     ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, message_lower)
-        if match:
-            city = match.group(1).strip()
-            # Capitalize properly
-            return ' '.join(word.capitalize() for word in city.split())
-    
-    # If no pattern matches, check if message is just a city name (simple words)
-    words = message.split()
-    if 1 <= len(words) <= 3 and all(word.replace(',', '').isalpha() for word in words):
-        return ' '.join(word.capitalize() for word in words)
-    
+    for p in patterns:
+        m = re.search(p, txt_lower)
+        if m:
+            city = m.group(1).strip(" .?;!,")
+            return " ".join(w.capitalize() for w in city.split())
+
+    # Short messages like "lagos" or "new york"
+    tokens = [t.strip(".,") for t in re.split(r"\s+", txt) if t.strip()]
+    if 1 <= len(tokens) <= 3 and all(t.replace(",", "").isalpha() for t in tokens):
+        return " ".join(w.capitalize() for w in tokens)
+
+    # Capitalized location after preposition in original text
+    m = re.search(r"(?:in|at|for)\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*){0,2})", txt)
+    if m:
+        return m.group(1).strip()
+
     return None
+
 
 
 def format_weather_response(data: Dict[str, Any]) -> str:
