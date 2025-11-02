@@ -94,6 +94,7 @@ async def weather_rest_endpoint(request: Request):
 
         rpc_request = JSONRPCRequest(**body)
         logger.info(f"A2A/Weather Request: method={rpc_request.method}, id={rpc_request.id}")
+        logger.debug(f"RPC params: {rpc_request.params!r}")
 
         raw_method = (rpc_request.method or "").strip()
         method_key = raw_method.lower().replace(" ", "")
@@ -148,6 +149,7 @@ async def weather_rest_endpoint(request: Request):
             # attempt to reuse cached city via context.channel_id if still missing
             if not city:
                 context = params.get("context") or {}
+                logger.debug(f"Conversational params/context: {params!r}")
                 channel_id = None
                 if isinstance(context, dict):
                     channel_id = context.get("channel_id") or context.get("channel")
