@@ -51,6 +51,12 @@ def create_error_response(
 
 @router.post("/a2a/weather")
 async def weather_rest_endpoint(request: Request):
+    """
+    Unified JSON-RPC / Telex handler:
+    - Accepts 'weather.get' (and 'getWeather') with params.city or params.query/text/message
+    - Accepts conversational 'message/send' and 'execute' and extracts city from message-like fields
+    - Falls back to last city from context.channel_id if not provided explicitly
+    """
     body = None
     try:
         raw = await request.body()
@@ -89,7 +95,7 @@ async def weather_rest_endpoint(request: Request):
 
         rpc_request = JSONRPCRequest(**body)
         logger.info(f"A2A/Weather Request: method={rpc_request.method}, id={rpc_request.id}")
-        logger.debug(f"RPC params: {rpc_request.params!r}")
+        logger.info(f"RPC params: {rpc_request.params!r}")
 
         raw_method = (rpc_request.method or "").strip()
         method_key = raw_method.lower().replace(" ", "")
@@ -131,27 +137,42 @@ async def weather_rest_endpoint(request: Request):
 
         # Conversational A2A payloads: extract from message(s)
         elif method in ("message.send", "execute"):
-            city = None
-            if method == "message.send":
-                msg = params.get("message")
-                if isinstance(msg, dict):
-                    text = msg.get("content") or msg.get("text") or ""
-                else:
-                    text = msg or ""
-                if text:
-                    city = extract_city_from_message(text)
+            candidates: list[str] = []
 
-            if not city and method == "execute":
-                msgs = params.get("messages") or []
+            # Common top-level fields Telex/Mastra may use
+            for key in ("message", "input", "text", "query", "body", "data", "event"):
+                v = params.get(key)
+                if not v:
+                    continue
+                if isinstance(v, dict):
+                    for sub in (v.get("content"), v.get("text"), v.get("message"), v.get("body")):
+                        if isinstance(sub, str) and sub:
+                            candidates.append(sub)
+                elif isinstance(v, str):
+                    candidates.append(v)
+
+            # messages list (for execute)
+            msgs = params.get("messages") or []
+            if isinstance(msgs, list):
                 for m in msgs:
-                    txt = m.get("content") if isinstance(m, dict) else str(m)
-                    city = extract_city_from_message(txt or "")
-                    if city:
-                        break
+                    if isinstance(m, dict):
+                        for sub in (m.get("content"), m.get("text")):
+                            if isinstance(sub, str) and sub:
+                                candidates.append(sub)
+                    else:
+                        candidates.append(str(m))
 
+            # Try to extract city from collected texts
+            for text in candidates:
+                city = extract_city_from_message(text)
+                if city:
+                    break
+
+            # explicit fallback
             if not city:
                 city = params.get("city")
 
+            # reuse last-city from context
             if not city:
                 context = params.get("context") or {}
                 channel_id = context.get("channel_id") or context.get("channel") if isinstance(context, dict) else None
@@ -213,7 +234,6 @@ async def weather_rest_endpoint(request: Request):
                 "error": {"code": JSONRPCError.INTERNAL_ERROR, "message": "Internal error", "data": {"details": str(e)}}
             }
         )
-
 
 
 
