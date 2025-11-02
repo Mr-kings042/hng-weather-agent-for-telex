@@ -51,11 +51,6 @@ def create_error_response(
 
 @router.post("/a2a/weather")
 async def weather_rest_endpoint(request: Request):
-    """
-    JSON-RPC style endpoint for Telex/Mastra calling this agent.
-    Accepts raw request body (JSON-RPC) and also handles A2A conversational methods
-    like `message/send` and `execute` by extracting the city from message text or params.
-    """
     body = None
     try:
         raw = await request.body()
@@ -81,7 +76,7 @@ async def weather_rest_endpoint(request: Request):
                 }
             )
 
-        # Basic JSON-RPC envelope validation
+        # Validate JSON-RPC envelope
         if body.get("jsonrpc") != "2.0" or "id" not in body or "method" not in body:
             return JSONResponse(
                 status_code=400,
@@ -108,55 +103,61 @@ async def weather_rest_endpoint(request: Request):
         }
         method = aliases.get(method_key, method_key)
 
-        # Normal weather.get call (explicit)
+        params = rpc_request.params or {}
+        city: Optional[str] = None
+
+        # weather.get: accept explicit city or free-text query
         if method == "weather.get":
-            params = rpc_request.params or {}
             city = params.get("city")
 
-        # Conversational A2A: message/send or execute (extract city from text or params)
-        elif method in ("message.send", "execute"):
-            params = rpc_request.params or {}
-            city = None
+            if not city:
+                q = params.get("query") or params.get("text") or params.get("message")
+                if isinstance(q, dict):
+                    q = q.get("content") or q.get("text") or ""
+                if isinstance(q, str) and q:
+                    city = extract_city_from_message(q)
 
-            # For message/send, params may be {"message": "..."} or {"message": {"content":"..."}}
+            if not city:
+                context = params.get("context") or {}
+                channel_id = context.get("channel_id") or context.get("channel") if isinstance(context, dict) else None
+                if channel_id:
+                    try:
+                        cached_city = await cache.get(f"conversation:last_city:{channel_id}")
+                        if isinstance(cached_city, str) and cached_city:
+                            city = cached_city
+                            logger.debug(f"Reused cached city for channel {channel_id}: {city}")
+                    except Exception as e:
+                        logger.warning(f"Failed to read cached city for channel {channel_id}: {e}")
+
+        # Conversational A2A payloads: extract from message(s)
+        elif method in ("message.send", "execute"):
+            city = None
             if method == "message.send":
                 msg = params.get("message")
                 if isinstance(msg, dict):
-                    # common payload shapes: {"message": {"content": "What's the weather in Lagos?"}}
                     text = msg.get("content") or msg.get("text") or ""
                 else:
                     text = msg or ""
-                # try to pull city from free text
-                city = extract_city_from_message(text) if text else None
+                if text:
+                    city = extract_city_from_message(text)
 
-            # For execute, params may include messages list
             if not city and method == "execute":
                 msgs = params.get("messages") or []
-                # messages may be list of dicts with 'content' or plain strings
                 for m in msgs:
-                    if isinstance(m, dict):
-                        txt = m.get("content") or m.get("text") or ""
-                    else:
-                        txt = str(m)
-                    city = extract_city_from_message(txt)
+                    txt = m.get("content") if isinstance(m, dict) else str(m)
+                    city = extract_city_from_message(txt or "")
                     if city:
                         break
 
-            # Allow explicit params.city in conversational payloads
             if not city:
                 city = params.get("city")
 
-            # attempt to reuse cached city via context.channel_id if still missing
             if not city:
                 context = params.get("context") or {}
-                logger.debug(f"Conversational params/context: {params!r}")
-                channel_id = None
-                if isinstance(context, dict):
-                    channel_id = context.get("channel_id") or context.get("channel")
+                channel_id = context.get("channel_id") or context.get("channel") if isinstance(context, dict) else None
                 if channel_id:
-                    cache_key = f"conversation:last_city:{channel_id}"
                     try:
-                        cached_city = await cache.get(cache_key)
+                        cached_city = await cache.get(f"conversation:last_city:{channel_id}")
                         if isinstance(cached_city, str) and cached_city:
                             city = cached_city
                             logger.debug(f"Reused cached city for channel {channel_id}: {city}")
@@ -170,14 +171,15 @@ async def weather_rest_endpoint(request: Request):
             )
             return JSONResponse(status_code=400, content=resp.model_dump())
 
+        logger.debug(f"Resolved city: {city!r}")
         if not city:
             resp = JSONRPCResponse(
                 id=rpc_request.id,
-                error={"code": JSONRPCError.INVALID_PARAMS, "message": "Missing required parameter: 'city' (provide in params or message text or context.channel_id)"}
+                error={"code": JSONRPCError.INVALID_PARAMS, "message": "Missing required parameter: 'city' (provide in params, query/text/message, or context.channel_id)"}
             )
             return JSONResponse(status_code=400, content=resp.model_dump())
 
-        # Fetch weather and handle errors
+        # Fetch weather
         try:
             weather_data = await weather_agent({"city": city})
         except CityNotFoundError as e:
@@ -187,7 +189,7 @@ async def weather_rest_endpoint(request: Request):
             resp = JSONRPCResponse(id=rpc_request.id, error={"code": JSONRPCError.WEATHER_API_ERROR, "message": str(e)})
             return JSONResponse(status_code=503, content=resp.model_dump())
 
-        # Persist resolved city if context provided
+        # Persist resolved city for follow-ups if context provided
         context = (rpc_request.params or {}).get("context") or {}
         if isinstance(context, dict):
             channel_id = context.get("channel_id") or context.get("channel")
