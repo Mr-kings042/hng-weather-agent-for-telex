@@ -4,7 +4,7 @@ import os
 log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, log_level, logging.INFO),
 format="%(levelname)s - %(filename)s - %(asctime)s - %(name)s- %(message)s",
-handlers=[logging.FileHandler("app.log"), logging.StreamHandler()])
+handlers=[logging.StreamHandler()])
 
 logger = logging.getLogger(__name__)
 

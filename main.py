@@ -21,4 +21,4 @@ app = FastAPI(title="A2A Weather Agent", lifespan=lifespan)
 app.include_router(router,tags=["A2A Weather Agent"])
 @app.get("/")
 async def root():
-    return {"status": 200, "message": "A2A Weather Agent is running."}
+    return {"status": "success", "message": "A2A Weather Agent is running."}
