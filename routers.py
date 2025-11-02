@@ -53,11 +53,11 @@ def create_error_response(
 async def weather_rest_endpoint(request: Request):
     """
     JSON-RPC style endpoint for Telex/Mastra calling this agent.
-    Accepts raw request body and returns a JSON-RPC response.
+    Accepts raw request body (JSON-RPC) and also handles A2A conversational methods
+    like `message/send` and `execute` by extracting the city from message text or params.
     """
     body = None
     try:
-        # Read raw body first so we can return a proper JSON-RPC parse error
         raw = await request.body()
         if not raw or raw.strip() == b"":
             return JSONResponse(
@@ -65,10 +65,7 @@ async def weather_rest_endpoint(request: Request):
                 content={
                     "jsonrpc": "2.0",
                     "id": None,
-                    "error": {
-                        "code": JSONRPCError.PARSE_ERROR,
-                        "message": "Parse error: empty request body"
-                    }
+                    "error": {"code": JSONRPCError.PARSE_ERROR, "message": "Parse error: empty request body"}
                 }
             )
 
@@ -80,76 +77,105 @@ async def weather_rest_endpoint(request: Request):
                 content={
                     "jsonrpc": "2.0",
                     "id": None,
-                    "error": {
-                        "code": JSONRPCError.PARSE_ERROR,
-                        "message": "Parse error: invalid JSON",
-                        "data": {"details": str(e)}
-                    }
+                    "error": {"code": JSONRPCError.PARSE_ERROR, "message": "Parse error: invalid JSON", "data": {"details": str(e)}}
                 }
             )
 
-        # Validate JSON-RPC envelope
+        # Basic JSON-RPC envelope validation
         if body.get("jsonrpc") != "2.0" or "id" not in body or "method" not in body:
             return JSONResponse(
                 status_code=400,
                 content={
                     "jsonrpc": "2.0",
                     "id": body.get("id"),
-                    "error": {
-                        "code": JSONRPCError.INVALID_REQUEST,
-                        "message": "Invalid Request: jsonrpc must be '2.0', id and method are required"
-                    }
+                    "error": {"code": JSONRPCError.INVALID_REQUEST, "message": "Invalid Request: jsonrpc must be '2.0', id and method are required"}
                 }
             )
 
         rpc_request = JSONRPCRequest(**body)
         logger.info(f"A2A/Weather Request: method={rpc_request.method}, id={rpc_request.id}")
 
-        # Normalize method and accept common aliases
         raw_method = (rpc_request.method or "").strip()
         method_key = raw_method.lower().replace(" ", "")
         aliases = {
             "getweather": "weather.get",
             "weather.get": "weather.get",
             "weatherget": "weather.get",
+            "message/send": "message.send",
+            "message.send": "message.send",
+            "execute": "execute",
         }
         method = aliases.get(method_key, method_key)
 
-        if method != "weather.get":
+        # Normal weather.get call (explicit)
+        if method == "weather.get":
+            params = rpc_request.params or {}
+            city = params.get("city")
+
+        # Conversational A2A: message/send or execute (extract city from text or params)
+        elif method in ("message.send", "execute"):
+            params = rpc_request.params or {}
+            city = None
+
+            # For message/send, params may be {"message": "..."} or {"message": {"content":"..."}}
+            if method == "message.send":
+                msg = params.get("message")
+                if isinstance(msg, dict):
+                    # common payload shapes: {"message": {"content": "What's the weather in Lagos?"}}
+                    text = msg.get("content") or msg.get("text") or ""
+                else:
+                    text = msg or ""
+                # try to pull city from free text
+                city = extract_city_from_message(text) if text else None
+
+            # For execute, params may include messages list
+            if not city and method == "execute":
+                msgs = params.get("messages") or []
+                # messages may be list of dicts with 'content' or plain strings
+                for m in msgs:
+                    if isinstance(m, dict):
+                        txt = m.get("content") or m.get("text") or ""
+                    else:
+                        txt = str(m)
+                    city = extract_city_from_message(txt)
+                    if city:
+                        break
+
+            # Allow explicit params.city in conversational payloads
+            if not city:
+                city = params.get("city")
+
+            # attempt to reuse cached city via context.channel_id if still missing
+            if not city:
+                context = params.get("context") or {}
+                channel_id = None
+                if isinstance(context, dict):
+                    channel_id = context.get("channel_id") or context.get("channel")
+                if channel_id:
+                    cache_key = f"conversation:last_city:{channel_id}"
+                    try:
+                        cached_city = await cache.get(cache_key)
+                        if isinstance(cached_city, str) and cached_city:
+                            city = cached_city
+                            logger.debug(f"Reused cached city for channel {channel_id}: {city}")
+                    except Exception as e:
+                        logger.warning(f"Failed to read cached city for channel {channel_id}: {e}")
+
+        else:
             resp = JSONRPCResponse(
                 id=rpc_request.id,
                 error={"code": JSONRPCError.METHOD_NOT_FOUND, "message": f"Method '{raw_method}' not supported on this endpoint"}
             )
             return JSONResponse(status_code=400, content=resp.model_dump())
 
-        # Extract params and optional context for conversation reuse
-        params = rpc_request.params or {}
-        city = params.get("city")
-
-        channel_id = None
-        context = params.get("context") or {}
-        if isinstance(context, dict):
-            channel_id = context.get("channel_id") or context.get("channel")
-        cache_key = f"conversation:last_city:{channel_id}" if channel_id else None
-
-        # Reuse cached city if none provided
-        if not city and cache_key:
-            try:
-                cached_city = await cache.get(cache_key)
-                if isinstance(cached_city, str) and cached_city:
-                    logger.debug(f"Reusing cached city for channel {channel_id}: {cached_city}")
-                    city = cached_city
-            except Exception as e:
-                logger.warning(f"Failed to read cached city for channel {channel_id}: {e}")
-
         if not city:
             resp = JSONRPCResponse(
                 id=rpc_request.id,
-                error={"code": JSONRPCError.INVALID_PARAMS, "message": "Missing required parameter: 'city' (or provide context.channel_id to reuse last city)"}
+                error={"code": JSONRPCError.INVALID_PARAMS, "message": "Missing required parameter: 'city' (provide in params or message text or context.channel_id)"}
             )
             return JSONResponse(status_code=400, content=resp.model_dump())
 
-        # Fetch weather
+        # Fetch weather and handle errors
         try:
             weather_data = await weather_agent({"city": city})
         except CityNotFoundError as e:
@@ -159,14 +185,16 @@ async def weather_rest_endpoint(request: Request):
             resp = JSONRPCResponse(id=rpc_request.id, error={"code": JSONRPCError.WEATHER_API_ERROR, "message": str(e)})
             return JSONResponse(status_code=503, content=resp.model_dump())
 
-        # Persist resolved city for follow-ups
-        if cache_key:
-            try:
-                await cache.set(cache_key, weather_data.get("city", city), ex=3600)
-            except Exception as e:
-                logger.warning(f"Failed to persist last city for channel {channel_id}: {e}")
+        # Persist resolved city if context provided
+        context = (rpc_request.params or {}).get("context") or {}
+        if isinstance(context, dict):
+            channel_id = context.get("channel_id") or context.get("channel")
+            if channel_id:
+                try:
+                    await cache.set(f"conversation:last_city:{channel_id}", weather_data.get("city", city), ex=3600)
+                except Exception as e:
+                    logger.warning(f"Failed to persist last city for channel {channel_id}: {e}")
 
-        # Build human-friendly response text and return JSON-RPC response
         response_text = format_weather_response(weather_data)
         result_payload = {"response": response_text, "data": weather_data}
         resp = JSONRPCResponse(id=rpc_request.id, result=result_payload)
@@ -178,11 +206,7 @@ async def weather_rest_endpoint(request: Request):
             content={
                 "jsonrpc": "2.0",
                 "id": body.get("id") if isinstance(body, dict) else None,
-                "error": {
-                    "code": JSONRPCError.INTERNAL_ERROR,
-                    "message": "Internal error",
-                    "data": {"details": str(e)}
-                }
+                "error": {"code": JSONRPCError.INTERNAL_ERROR, "message": "Internal error", "data": {"details": str(e)}}
             }
         )
 
