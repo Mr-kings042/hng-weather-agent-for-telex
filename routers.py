@@ -119,7 +119,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             "execute": "execute",
         }
         method = method_aliases.get(method_key, method_key)
-                params: Dict[str, Any] = rpc_request.params or {}
+        params: Dict[str, Any] = rpc_request.params or {}
 
         # Telex configuration (force blocking for immediate replies)
         config_input = params.get("configuration")
