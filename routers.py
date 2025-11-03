@@ -293,6 +293,8 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 "kind": "message",
                 "role": "agent",
                 "parts": [{"kind": "text", "text": human_text}],
+                 "messageId": message_id,
+                 "taskId": task_id
             }
             telex_result = {
                 "id": task_id,
@@ -301,8 +303,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                     "state": "completed",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "message": telex_message,
-                     "messageId": message_id,
-                      "taskId": task_id,
+                    
                 },
                 "artifacts": [
                     {
@@ -378,7 +379,8 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 "kind": "message",
                 "role": "agent",
                 "parts": [{"kind": "text", "text": human_text}],
-                
+                 "messageId": message_id,
+                "taskId": task_id
             }
             telex_result = {
                 "id": task_id,
@@ -387,8 +389,6 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                     "state": "completed",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "message": telex_message,
-                    "messageId": message_id,
-                      "taskId": task_id,
                 },
                 "artifacts": [
                     {
