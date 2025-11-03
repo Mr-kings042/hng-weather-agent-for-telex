@@ -58,8 +58,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
     """
     Unified JSON-RPC / Telex handler:
     - Accepts 'weather.get' (and alias 'getWeather') with params.city or free-text query.
-    - Accepts conversational 'message/send' and 'execute' and extracts city from message-like fields
-      (including Telex `message.parts` arrays).
+    - Accepts conversational 'message/send' and 'execute' and extracts city/cities from message-like fields.
     - Falls back to last city via params.context.channel_id.
     - Normalizes city names (abbr/typos) and optionally standardizes via geocoding/canonical map.
     """
@@ -129,6 +128,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
 
         params: Dict[str, Any] = rpc_request.params or {}
         city: Optional[str] = None
+        found_cities: List[str] = []
 
         if method == "weather.get":
             # Accept explicit city or free-text query fields
@@ -158,7 +158,6 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
 
             msg = params.get("message")
             if isinstance(msg, dict):
-                # Telex message.parts: prefer current user text, de-prioritize history in 'data'
                 parts = msg.get("parts") or []
                 first_user_text: Optional[str] = None
                 backlog_texts: List[str] = []
@@ -176,18 +175,14 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                                         backlog_texts.append(d["text"])
                 if first_user_text:
                     candidates.append(first_user_text)
-                candidates.extend(backlog_texts)  # history as low-priority
-
-                # Legacy fields
+                candidates.extend(backlog_texts)
                 for sub in (msg.get("content"), msg.get("text"), msg.get("message"), msg.get("body")):
                     if isinstance(sub, str) and sub:
                         candidates.append(sub)
 
             elif isinstance(msg, str):
-                # Allow plain string message
                 candidates.append(msg)
 
-            # Other common fields seen in A2A payloads
             for key in ("input", "text", "query", "body", "data", "event"):
                 v = params.get(key)
                 if isinstance(v, dict):
@@ -197,7 +192,6 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 elif isinstance(v, str) and v:
                     candidates.append(v)
 
-            # Execute: messages list
             msgs = params.get("messages") or []
             if isinstance(msgs, list):
                 for m in msgs:
@@ -208,18 +202,24 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                     else:
                         candidates.append(str(m))
 
-            # Try extraction in order
+            # Try multi-city extraction in order
             for text in candidates:
-                city = extract_city_from_message(text)
-                if city:
+                found_cities = extract_cities_from_message(text)
+                if found_cities:
                     break
 
-            # Explicit override
-            if not city:
-                city = params.get("city")
+            # Explicit override (allow comma/and-separated)
+            if not found_cities:
+                explicit = params.get("city")
+                if isinstance(explicit, str) and explicit.strip():
+                    found_cities = extract_cities_from_message(explicit)
 
-            # Context fallback
-            if not city:
+            # If exactly one city, keep single-city flow; else batch
+            if len(found_cities) == 1:
+                city = found_cities[0]
+
+            # Context fallback (single-city only)
+            if not city and not found_cities:
                 channel_id = _get_channel_id(params.get("context"))
                 if channel_id:
                     try:
@@ -238,6 +238,76 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             )
             return JSONResponse(status_code=400, content=resp.model_dump())
 
+        # Conversational multi-city batch path
+        if method in ("message.send", "execute") and len(found_cities) >= 2:
+            # Normalize each city before batch fetch
+            normed: List[str] = []
+            for c in found_cities:
+                resolved = await resolve_city_name(c)
+                normed.append(resolved or c)
+            try:
+                results = await fetch_weather_batch(normed)
+            except Exception as e:
+                err = create_error_response(
+                    rpc_request.id, JSONRPCError.INTERNAL_ERROR, "Internal error", data={"details": str(e)}
+                )
+                return JSONResponse(status_code=500, content=err.model_dump())
+
+            # Build a combined human response
+            sections: List[str] = []
+            for c in normed:
+                payload = results.get(c) or {}
+                if payload.get("error"):
+                    sections.append(f"❗ {c}: {payload.get('error')}")
+                else:
+                    sections.append(format_weather_response(payload))
+            human_text = "\n\n---\n\n".join(sections)
+
+            # Persist last city as the last mentioned
+            channel_id = _get_channel_id((rpc_request.params or {}).get("context"))
+            if channel_id and normed:
+                try:
+                    await cache.set(
+                        f"conversation:last_city:{channel_id}",
+                        normed[-1],
+                        ex=3600,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist last city for channel {channel_id}: {e}")
+
+            # Telex-style task result (include top-level message mirror for compatibility)
+            task_id = _get_task_id(params)
+            context_id = channel_id or _generate_context_id()
+            message_id = _new_id()
+            telex_message = {
+                "messageId": message_id,
+                "role": "agent",
+                "parts": [{"kind": "text", "text": human_text}],
+                "kind": "message",
+                "taskId": task_id,
+            }
+            telex_result = {
+                "id": task_id,
+                "contextId": context_id,
+                "status": {
+                    "state": "succeeded",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "message": telex_message,
+                },
+                "message": telex_message,  # mirror for clients that read result.message directly
+                "artifacts": [
+                    {
+                        "artifactId": _new_id(),
+                        "name": "weather",
+                        "parts": [{"kind": "text", "text": json.dumps(results, ensure_ascii=False)}],
+                    }
+                ],
+                "history": [],
+                "kind": "task",
+            }
+            resp = JSONRPCResponse(id=rpc_request.id, result=telex_result)
+            return JSONResponse(status_code=200, content=resp.model_dump())
+
         # Normalize/resolve city (abbr/typos + API/canonical standardization)
         if city:
             city = await resolve_city_name(city)
@@ -251,7 +321,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             )
             return JSONResponse(status_code=400, content=resp.model_dump())
 
-        # Fetch weather
+        # Fetch weather (single-city)
         try:
             weather_data = await svc.weather_agent({"city": city})
         except CityNotFoundError as e:
@@ -289,21 +359,22 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             task_id = _get_task_id(params)
             context_id = channel_id or _generate_context_id()
             message_id = _new_id()
-
+            telex_message = {
+                "messageId": message_id,
+                "role": "agent",
+                "parts": [{"kind": "text", "text": human_text}],
+                "kind": "message",
+                "taskId": task_id,
+            }
             telex_result = {
                 "id": task_id,
                 "contextId": context_id,
                 "status": {
                     "state": "succeeded",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "message": {
-                        "messageId": message_id,
-                        "role": "agent",
-                        "parts": [{"kind": "text", "text": human_text}],
-                        "kind": "message",
-                        "taskId": task_id,
-                    },
+                    "message": telex_message,
                 },
+                "message": telex_message,  # mirror for compatibility
                 "artifacts": [
                     {
                         "artifactId": _new_id(),
@@ -321,13 +392,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
 
         # Classic result for weather.get (keeps tests passing)
         result_payload = {"response": human_text, "data": weather_data}
-        telex_display = {
-    "response": human_text,
-    "data": weather_data,
-    "task": telex_result}
-        resp = JSONRPCResponse(id=rpc_request.id, result=telex_display)
-        logger.info(f"Sending Telex chat response:\n{json.dumps(resp.model_dump(), indent=2)}")
-
+        resp = JSONRPCResponse(id=rpc_request.id, result=result_payload)
         return JSONResponse(status_code=200, content=resp.model_dump())
 
     except Exception as e:
@@ -367,7 +432,6 @@ async def weather_batch_endpoint(cities: List[str]):
                 status_code=400,
                 detail="Too many cities. Maximum 10 per request.",
             )
-        # Optionally normalize each city before batch fetch to improve hit rate
         normed: List[str] = []
         for c in cities:
             resolved = await resolve_city_name(c)
@@ -457,66 +521,57 @@ def _generate_context_id() -> str:
 def _new_id() -> str:
     return str(uuid.uuid4())
 
-def extract_city_from_message(message: str) -> Optional[str]:
+def _explode_multi_place(segment: str) -> List[str]:
     """
-    Smarter extractor that:
-    - Prefers the latest city if multiple appear in one sentence.
-    - Stops matches at punctuation / conjunctions / next 'weather' clause.
-    - Handles 'Tell me about Paris' (no weather keyword).
-    - Expands abbreviations (NYC -> New York City) and fuzzy-corrects typos.
+    Split joined places like 'Paris and Lagos, Nairobi' into ['Paris','Lagos','Nairobi'].
+    """
+    parts = [p.strip(" .,!?:;") for p in re.split(r"\s*(?:,|and|or|/|&)\s*", segment) if p and p.strip()]
+    return [p for p in parts if p]
+
+def extract_cities_from_message(message: str) -> List[str]:
+    """
+    Extract multiple plausible cities (preserving order and uniqueness).
+    Applies abbreviation expansion and fuzzy correction.
     """
     if not message:
-        return None
-
-    # Strip simple HTML tags Telex sometimes includes (e.g., <p>...</p>)
+        return []
     txt = re.sub(r"<[^>]+>", " ", message).strip()
     if not txt:
-        return None
+        return []
     lo = txt.lower()
 
     def _slice_from(lo_match: re.Match) -> str:
         s, e = lo_match.span(1)
         return txt[s:e].strip(" .,!?:;")
 
-    cities: List[str] = []
-
-    # 1) Weather prompts: find all occurrences, non-greedy up to punctuation/conjunction/next keyword
+    raw: List[str] = []
     p_weather_1 = r"(?:weather|forecast|temperature)\s+(?:in|at|for)\s+([a-z][a-z\s,]{1,50}?)(?=$|[?.!]|(?:\s+(?:and|but|or|then|what|how)\b)|\s+weather\b)"
     p_weather_2 = r"(?:what(?:'|’)?s|whats|how(?:'|’)?s)\s+(?:the\s+)?(?:weather|forecast)\s+(?:in|at|for)\s+([a-z][a-z\s,]{1,50}?)(?=$|[?.!]|(?:\s+(?:and|but|or|then|what|how)\b)|\s+weather\b)"
     for m in re.finditer(p_weather_1, lo):
-        cities.append(_slice_from(m))
+        raw.extend(_explode_multi_place(_slice_from(m)))
     for m in re.finditer(p_weather_2, lo):
-        cities.append(_slice_from(m))
-
-    # 2) Non-weather info prompts (about/regarding ...)
+        raw.extend(_explode_multi_place(_slice_from(m)))
     p_about = r"(?:tell\s+me\s+about|about|regarding|info\s+on|information\s+on)\s+([a-z][a-z\s,]{1,50}?)(?=$|[?.!]|(?:\s+(?:and|but|or)\b))"
     for m in re.finditer(p_about, lo):
-        cities.append(_slice_from(m))
-
-    # 3) Generic preposition + capitalized phrase in original text (fallback)
+        raw.extend(_explode_multi_place(_slice_from(m)))
     m = re.search(r"(?:in|at|for|about)\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*){0,3})", txt)
     if m:
-        cities.append(m.group(1).strip())
-
-    # 4) Plain short tokens that look like a place (1-3 words, non-stopwords)
-    if not cities:
+        raw.extend(_explode_multi_place(m.group(1).strip()))
+    if not raw:
         tokens = [t.strip(".,!?") for t in re.split(r"\s+", txt) if t.strip()]
         filtered = [t for t in tokens if t.lower() not in STOPWORDS]
         if 1 <= len(filtered) <= 3 and all(t.replace(",", "").isalpha() for t in filtered):
-            cities.append(" ".join(filtered))
+            raw.append(" ".join(filtered))
 
-    # Normalize all candidates, keep only plausible uniques, choose the last
     normalized: List[str] = []
     seen = set()
-    for c in cities:
+    for c in raw:
         if not c:
             continue
         cand = c.strip(" .,!?:;")
-        # Abbreviations
         ab = _maybe_from_abbr(cand)
         if ab:
             cand = ab
-        # Fuzzy correction
         fuzzy = _fuzzy_city(cand)
         if fuzzy:
             cand = fuzzy
@@ -525,11 +580,14 @@ def extract_city_from_message(message: str) -> Optional[str]:
         if key not in seen:
             seen.add(key)
             normalized.append(cand)
+    return normalized
 
-    if not normalized:
-        return None
-    # Prefer the last mentioned city if multiple were found
-    return normalized[-1]
+def extract_city_from_message(message: str) -> Optional[str]:
+    """
+    Backward-compatible single-city extractor (returns last of the mentions).
+    """
+    cities = extract_cities_from_message(message)
+    return cities[-1] if cities else None
 
 async def resolve_city_name(candidate: str) -> Optional[str]:
     """
@@ -542,22 +600,18 @@ async def resolve_city_name(candidate: str) -> Optional[str]:
     if not candidate:
         return None
 
-    # Abbreviations
     ab = _maybe_from_abbr(candidate)
     if ab:
         candidate = ab
 
-    # Fuzzy correction
     fuzzy = _fuzzy_city(candidate)
     if fuzzy:
         candidate = fuzzy
 
-    # Canonical map (avoid network in tests)
     canon = CANONICAL_CITY.get(candidate.strip().lower())
     if canon:
         return canon
 
-    # Geocode to standardize (best effort)
     geo_url = os.environ.get("GEO_URL", GEO_URL_DEFAULT)
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -571,7 +625,6 @@ async def resolve_city_name(candidate: str) -> Optional[str]:
                 country = loc.get("country")
                 return f"{name}, {country}" if country else name
     except Exception:
-        # Swallow geocoding errors; fall back to local best guess
         pass
 
     return _title_case(candidate)
