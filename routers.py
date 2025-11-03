@@ -275,7 +275,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 except Exception as e:
                     logger.warning(f"Failed to persist last city for channel {channel_id}: {e}")
 
-            # Telex-style task result (include top-level message mirror for compatibility)
+            # Telex-style task result (state must be 'completed', no top-level 'message' duplicate)
             task_id = _get_task_id(params)
             context_id = channel_id or _generate_context_id()
             message_id = _new_id()
@@ -290,11 +290,10 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 "id": task_id,
                 "contextId": context_id,
                 "status": {
-                    "state": "succeeded",
+                    "state": "completed",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "message": telex_message,
                 },
-                "message": telex_message,  # mirror for clients that read result.message directly
                 "artifacts": [
                     {
                         "artifactId": _new_id(),
@@ -370,11 +369,10 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 "id": task_id,
                 "contextId": context_id,
                 "status": {
-                    "state": "succeeded",
+                    "state": "completed",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "message": telex_message,
                 },
-                "message": telex_message,  # mirror for compatibility
                 "artifacts": [
                     {
                         "artifactId": _new_id(),
@@ -466,9 +464,9 @@ ABBREVIATIONS = {
     "vegas": "Las Vegas",
     "dc": "Washington",
     "d.c.": "Washington",
-    "uk": "London",    
-    "uae": "Dubai",    
-    "eko": "Lagos",    
+    "uk": "London",
+    "uae": "Dubai",
+    "eko": "Lagos",
 }
 
 COMMON_CITIES = {
