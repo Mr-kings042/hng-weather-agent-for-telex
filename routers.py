@@ -290,11 +290,9 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             context_id = channel_id or _generate_context_id()
             message_id = _new_id()
             telex_message = {
-                "messageId": message_id,
+                "kind": "message",
                 "role": "agent",
                 "parts": [{"kind": "text", "text": human_text}],
-                "kind": "message",
-                "taskId": task_id,
             }
             telex_result = {
                 "id": task_id,
@@ -303,6 +301,8 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                     "state": "completed",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "message": telex_message,
+                     "messageId": message_id,
+                      "taskId": task_id,
                 },
                 "artifacts": [
                     {
@@ -311,7 +311,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                         "parts": [{"kind": "text", "text": human_text}],
                     }
                 ],
-                "history": [],
+               
                 "kind": "task",
             }
             resp = JSONRPCResponse(id=rpc_request.id, result=telex_result)
@@ -375,11 +375,10 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             context_id = channel_id or _generate_context_id()
             message_id = _new_id()
             telex_message = {
-                "messageId": message_id,
+                "kind": "message",
                 "role": "agent",
                 "parts": [{"kind": "text", "text": human_text}],
-                "kind": "message",
-                "taskId": task_id,
+                
             }
             telex_result = {
                 "id": task_id,
@@ -388,15 +387,16 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                     "state": "completed",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "message": telex_message,
+                    "messageId": message_id,
+                      "taskId": task_id,
                 },
                 "artifacts": [
                     {
                         "artifactId": _new_id(),
                         "name": "weatherData",
-                        "parts": [{"kind": "text", "text": artifacts_data_single}],
+                        "parts": [{"kind": "text", "text": human_text}],
                     }
                 ],
-                "history": [],
                 "kind": "task",
             }
             resp = JSONRPCResponse(id=rpc_request.id, result=telex_result)
