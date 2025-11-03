@@ -321,7 +321,13 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
 
         # Classic result for weather.get (keeps tests passing)
         result_payload = {"response": human_text, "data": weather_data}
-        resp = JSONRPCResponse(id=rpc_request.id, result=result_payload)
+        telex_display = {
+    "response": human_text,
+    "data": weather_data,
+    "task": telex_result}
+        resp = JSONRPCResponse(id=rpc_request.id, result=telex_display)
+        logger.info(f"Sending Telex chat response:\n{json.dumps(resp.model_dump(), indent=2)}")
+
         return JSONResponse(status_code=200, content=resp.model_dump())
 
     except Exception as e:
