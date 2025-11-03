@@ -246,15 +246,9 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 )
                 return JSONResponse(status_code=500, content=err.model_dump())
 
-            # Build a combined human response
-            sections: List[str] = []
-            for c in normed:
-                payload = results.get(c) or {}
-                if payload.get("error"):
-                    sections.append(f"❗ {c}: {payload.get('error')}")
-                else:
-                    sections.append(format_weather_response(payload))
-            human_text = "\n\n---\n\n".join(sections)
+            # Build compact artifact + human text (Telex style)
+            artifacts_data = to_telex_artifact_batch(results, preserve_order=normed)
+            human_text = format_telex_text_batch(artifacts_data)
 
             # Persist last city as the last mentioned
             channel_id = _get_channel_id((rpc_request.params or {}).get("context"))
@@ -291,12 +285,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                     {
                         "artifactId": _new_id(),
                         "name": "weatherData",
-                        "parts": [
-                            {
-                                "kind": "data",
-                                "data": results,
-                            }
-                        ],
+                        "parts": [{"kind": "data", "data": artifacts_data}],
                     }
                 ],
                 "history": [],
@@ -348,8 +337,9 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             except Exception as e:
                 logger.warning(f"Failed to persist last city for channel {channel_id}: {e}")
 
-        # Build result payloads
-        human_text = format_weather_response(weather_data)
+        # Build Telex message + artifact
+        human_text = format_telex_text_single(weather_data)
+        artifacts_data_single = to_telex_artifact_single(weather_data)
 
         # Telex-style task result for conversational methods
         if method in ("message.send", "execute"):
@@ -375,12 +365,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                     {
                         "artifactId": _new_id(),
                         "name": "weatherData",
-                        "parts": [
-                            {
-                                "kind": "data",
-                                "data": weather_data,
-                            }
-                        ],
+                        "parts": [{"kind": "data", "data": artifacts_data_single}],
                     }
                 ],
                 "history": [],
@@ -390,7 +375,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             return JSONResponse(status_code=200, content=resp.model_dump())
 
         # Classic result for weather.get (keeps tests passing)
-        result_payload = {"response": human_text, "data": weather_data}
+        result_payload = {"response": format_weather_response(weather_data), "data": weather_data}
         resp = JSONRPCResponse(id=rpc_request.id, result=result_payload)
         return JSONResponse(status_code=200, content=resp.model_dump())
 
@@ -541,7 +526,6 @@ def _split_bare_city_list(segment: str) -> List[str]:
         cand = _maybe_from_abbr(tok) or _fuzzy_city(tok) or _title_case(tok)
         if not cand:
             continue
-        # Validate against known lists to avoid random words
         if cand in COMMON_CITIES or cand in ABBREVIATIONS.values():
             key = cand.lower()
             if key not in seen:
@@ -584,7 +568,6 @@ def extract_cities_from_message(message: str) -> List[str]:
         split = _split_bare_city_list(" ".join(filtered))
         if split:
             return split
-        # Fallback: treat the remaining phrase as one candidate (legacy behavior)
         if 1 <= len(filtered) <= 3 and all(t.replace(",", "").isalpha() for t in filtered):
             raw.append(" ".join(filtered))
 
@@ -655,7 +638,7 @@ async def resolve_city_name(candidate: str) -> Optional[str]:
     return _title_case(candidate)
 
 def format_weather_response(data: Dict[str, Any]) -> str:
-    """Build a user-friendly weather response."""
+    """Multi-line friendly message (kept for classic weather.get responses)."""
     city = data.get("city", "Unknown")
     temp = data.get("temperature_c")
     weather = data.get("weather", "unknown conditions")
@@ -676,6 +659,56 @@ def format_weather_response(data: Dict[str, Any]) -> str:
         parts.append("_ℹ️ (Cached data)_")
 
     return "\n\n".join(parts)
+
+def format_telex_text_single(data: Dict[str, Any]) -> str:
+    """One-line Telex-friendly sentence."""
+    city = data.get("city", "Unknown")
+    temp = data.get("temperature_c")
+    cond = data.get("weather", "unknown conditions")
+    temp_part = f"{round(temp)}°C" if isinstance(temp, (int, float)) else "unknown temperature"
+    return f"The current weather in {city} is {temp_part} with {cond}."
+
+def format_telex_text_batch(compact: Dict[str, Any]) -> str:
+    """Join per-city one-liners for batch replies (order preserved if values have _order)."""
+    lines: List[str] = []
+    # Use _order if present to preserve user order
+    order = compact.get("_order", list(compact.keys()))
+    for city in order:
+        if city == "_order":
+            continue
+        entry = compact.get(city) or {}
+        if "error" in entry:
+            lines.append(f"{city}: {entry.get('error')}")
+            continue
+        temp = entry.get("temperature")
+        cond = entry.get("conditions", "unknown conditions")
+        temp_part = f"{round(temp)}°C" if isinstance(temp, (int, float)) else "unknown temperature"
+        lines.append(f"The current weather in {city} is {temp_part} with {cond}.")
+    return "\n".join(lines)
+
+def to_telex_artifact_single(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact artifact payload for one city."""
+    return {
+        "temperature": data.get("temperature_c"),
+        "humidity": data.get("humidity"),
+        "conditions": data.get("weather"),
+    }
+
+def to_telex_artifact_batch(results: Dict[str, Dict[str, Any]], preserve_order: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Compact artifact payload for multiple cities:
+    { "City, Country": {"temperature": x, "humidity": y, "conditions": "..."}, ... }
+    Includes optional '_order' key to preserve presentation order.
+    """
+    compact: Dict[str, Any] = {}
+    for city, payload in results.items():
+        if isinstance(payload, dict) and payload.get("error"):
+            compact[city] = {"error": payload.get("error")}
+            continue
+        compact[city] = to_telex_artifact_single(payload or {})
+    if preserve_order:
+        compact["_order"] = preserve_order[:]
+    return compact
 
 def get_weather_emoji(weather: str) -> str:
     """Get appropriate emoji for weather condition."""
