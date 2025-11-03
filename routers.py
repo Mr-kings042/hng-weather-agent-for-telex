@@ -90,18 +90,18 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             )
 
         # JSON-RPC envelope validation
-        if body.get("jsonrpc") != "2.0" or "id" not in body or "method" not in body:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "jsonrpc": "2.0",
-                    "id": body.get("id"),
-                    "error": {
-                        "code": JSONRPCError.INVALID_REQUEST,
-                        "message": "Invalid Request: jsonrpc must be '2.0', id and method are required",
-                    },
-                },
-            )
+        # if body.get("jsonrpc") != "2.0" or "id" not in body or "method" not in body:
+        #     return JSONResponse(
+        #         status_code=400,
+        #         content={
+        #             "jsonrpc": "2.0",
+        #             "id": body.get("id"),
+        #             "error": {
+        #                 "code": JSONRPCError.INVALID_REQUEST,
+        #                 "message": "Invalid Request: jsonrpc must be '2.0', id and method are required",
+        #             },
+        #         },
+        #     )
 
         rpc_request = JSONRPCRequest(**body)
         logger.info(f"A2A/Weather Request: method={rpc_request.method}, id={rpc_request.id}")
