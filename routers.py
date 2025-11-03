@@ -308,7 +308,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                     {
                         "artifactId": _new_id(),
                         "name": "weatherData",
-                        "parts": [{"kind": "data", "data": artifacts_data}],
+                        "parts": [{"kind": "data", "data": human_text}],
                     }
                 ],
                 "history": [],
