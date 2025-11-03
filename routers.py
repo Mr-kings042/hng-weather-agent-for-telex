@@ -119,15 +119,29 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             "execute": "execute",
         }
         method = method_aliases.get(method_key, method_key)
+                params: Dict[str, Any] = rpc_request.params or {}
 
-        params: Dict[str, Any] = rpc_request.params or {}
-
-        # Telex configuration (blocking and webhook)
-        config: Dict[str, Any] = params.get("configuration") or {}
-        blocking: bool = bool(config.get("blocking", True))
-        push_cfg: Dict[str, Any] = (config.get("pushNotificationConfig") or {})
+        # Telex configuration (force blocking for immediate replies)
+        config_input = params.get("configuration")
+        config: Dict[str, Any] = config_input.copy() if isinstance(config_input, dict) else {}
+        push_cfg_input = config.get("pushNotificationConfig")
+        push_cfg: Dict[str, Any] = push_cfg_input.copy() if isinstance(push_cfg_input, dict) else {}
         push_url: Optional[str] = push_cfg.get("url")
         push_token: Optional[str] = push_cfg.get("token")
+        if push_cfg:
+            config["pushNotificationConfig"] = push_cfg
+        config["blocking"] = True
+        params["configuration"] = config
+        blocking: bool = True
+
+        # params: Dict[str, Any] = rpc_request.params or {}
+
+        # # Telex configuration (blocking and webhook)
+        # config: Dict[str, Any] = params.get("configuration")
+        # blocking: bool = bool(config.get("blocking", True))
+        # push_cfg: Dict[str, Any] = (config.get("pushNotificationConfig") or {})
+        # push_url: Optional[str] = push_cfg.get("url")
+        # push_token: Optional[str] = push_cfg.get("token")
 
         city: Optional[str] = None
         found_cities: List[str] = []
