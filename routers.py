@@ -5,6 +5,7 @@ import os
 import re
 import difflib
 import uuid
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 
@@ -120,6 +121,14 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
         method = method_aliases.get(method_key, method_key)
 
         params: Dict[str, Any] = rpc_request.params or {}
+
+        # Telex configuration (blocking and webhook)
+        config: Dict[str, Any] = params.get("configuration") or {}
+        blocking: bool = bool(config.get("blocking", True))
+        push_cfg: Dict[str, Any] = (config.get("pushNotificationConfig") or {})
+        push_url: Optional[str] = push_cfg.get("url")
+        push_token: Optional[str] = push_cfg.get("token")
+
         city: Optional[str] = None
         found_cities: List[str] = []
 
@@ -292,6 +301,11 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 "kind": "task",
             }
             resp = JSONRPCResponse(id=rpc_request.id, result=telex_result)
+
+            # If non-blocking, push result to Telex webhook asynchronously
+            if not blocking and push_url and push_token:
+                asyncio.create_task(_post_telex_callback(rpc_request.id, telex_result, push_url, push_token))
+
             return JSONResponse(status_code=200, content=resp.model_dump())
 
         # Normalize/resolve city (abbr/typos + API/canonical standardization)
@@ -372,6 +386,11 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 "kind": "task",
             }
             resp = JSONRPCResponse(id=rpc_request.id, result=telex_result)
+
+            # If non-blocking, push result to Telex webhook asynchronously
+            if not blocking and push_url and push_token:
+                asyncio.create_task(_post_telex_callback(rpc_request.id, telex_result, push_url, push_token))
+
             return JSONResponse(status_code=200, content=resp.model_dump())
 
         # Classic result for weather.get (keeps tests passing)
@@ -741,3 +760,32 @@ def get_weather_suggestion(temp: Optional[float], weather: str) -> Optional[str]
     if "clear" in wl and temp is not None and 20 <= temp <= 28:
         return "Perfect weather for outdoor activities! 🚶‍♂️"
     return None
+
+
+# ============================================================================
+# Telex webhook push (non-blocking)
+# ============================================================================
+
+async def _post_telex_callback(rpc_id: Any, telex_result: Dict[str, Any], url: str, token: str) -> None:
+    """
+    Post the completed task back to Telex when configuration.blocking == false.
+    Sends the same JSON-RPC envelope Telex expects.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "result": telex_result,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(url, headers=headers, json=payload)
+            if r.status_code >= 300:
+                logger.warning(f"Telex webhook push failed ({r.status_code}): {r.text}")
+            else:
+                logger.info("Pushed result to Telex webhook (non-blocking).")
+    except Exception as e:
+        logger.error(f"Error pushing Telex webhook: {e}")
