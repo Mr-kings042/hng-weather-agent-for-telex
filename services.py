@@ -266,6 +266,9 @@ async def weather_agent(params: Dict[str, Any]) -> Dict[str, Any]:
     except WeatherAPIError:
         logger.error("Weather API error for: %s", weather_params.city)
         raise
+    except Exception as e:
+        logger.exception("Unexpected error fetching%s: %s", weather_params.city, e)
+        raise WeatherAPIError(f"Failed to fetch weather: {e}") from e
 
     # Cache normalized payload
     cache_payload = {
