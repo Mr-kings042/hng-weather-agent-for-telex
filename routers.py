@@ -268,7 +268,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 except Exception as e:
                     logger.warning(f"Failed to persist last city for channel {channel_id}: {e}")
 
-            # Telex-style task result (state must be 'completed', no top-level 'message' duplicate)
+            # Telex-style task result
             task_id = _get_task_id(params)
             context_id = channel_id or _generate_context_id()
             message_id = _new_id()
@@ -294,7 +294,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                         "parts": [
                             {
                                 "kind": "data",
-                                "data": results,  # structured batch payload
+                                "data": results,
                             }
                         ],
                     }
@@ -332,7 +332,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             )
             return JSONResponse(status_code=503, content=resp.model_dump())
 
-        # Ensure city in response is the normalized one (useful when tests stub weather_agent)
+        # Ensure city in response is the normalized one
         if city and weather_data.get("city") != city:
             weather_data["city"] = city
 
@@ -378,7 +378,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                         "parts": [
                             {
                                 "kind": "data",
-                                "data": weather_data,  # structured single-city payload
+                                "data": weather_data,
                             }
                         ],
                     }
@@ -527,6 +527,28 @@ def _explode_multi_place(segment: str) -> List[str]:
     parts = [p.strip(" .,!?:;") for p in re.split(r"\s*(?:,|and|or|/|&)\s*", segment) if p and p.strip()]
     return [p for p in parts if p]
 
+def _split_bare_city_list(segment: str) -> List[str]:
+    """
+    Split bare space-separated city list like 'Lagos London Paris' into ['Lagos','London','Paris'].
+    Heuristic: accept tokens that fuzzy-match known/common cities or abbreviations.
+    """
+    tokens = [t.strip(" .,!?:;") for t in re.split(r"\s+", segment) if t.strip()]
+    if len(tokens) < 2:
+        return []
+    results: List[str] = []
+    seen = set()
+    for tok in tokens:
+        cand = _maybe_from_abbr(tok) or _fuzzy_city(tok) or _title_case(tok)
+        if not cand:
+            continue
+        # Validate against known lists to avoid random words
+        if cand in COMMON_CITIES or cand in ABBREVIATIONS.values():
+            key = cand.lower()
+            if key not in seen:
+                seen.add(key)
+                results.append(cand)
+    return results if len(results) >= 2 else []
+
 def extract_cities_from_message(message: str) -> List[str]:
     if not message:
         return []
@@ -549,15 +571,30 @@ def extract_cities_from_message(message: str) -> List[str]:
     p_about = r"(?:tell\s+me\s+about|about|regarding|info\s+on|information\s+on)\s+([a-z][a-z\s,]{1,50}?)(?=$|[?.!]|(?:\s+(?:and|but|or)\b))"
     for m in re.finditer(p_about, lo):
         raw.extend(_explode_multi_place(_slice_from(m)))
+
+    # Simple capitalized 'in/at/for/about' capture
     m = re.search(r"(?:in|at|for|about)\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*){0,3})", txt)
     if m:
         raw.extend(_explode_multi_place(m.group(1).strip()))
+
+    # If still nothing, try to interpret bare list like 'Lagos London Paris'
     if not raw:
         tokens = [t.strip(".,!?") for t in re.split(r"\s+", txt) if t.strip()]
         filtered = [t for t in tokens if t.lower() not in STOPWORDS]
+        split = _split_bare_city_list(" ".join(filtered))
+        if split:
+            return split
+        # Fallback: treat the remaining phrase as one candidate (legacy behavior)
         if 1 <= len(filtered) <= 3 and all(t.replace(",", "").isalpha() for t in filtered):
             raw.append(" ".join(filtered))
 
+    # If exactly one long segment without delimiters, try the bare splitter again
+    if len(raw) == 1 and (" " in raw[0]) and not re.search(r"(?:,| and |/|&)", raw[0], re.I):
+        split = _split_bare_city_list(raw[0])
+        if split:
+            return split
+
+    # Normalize and de-duplicate
     normalized: List[str] = []
     seen = set()
     for c in raw:
