@@ -55,13 +55,6 @@ def create_error_response(
 
 @router.post("/a2a/weather")
 async def weather_rest_endpoint(request: Request) -> JSONResponse:
-    """
-    Unified JSON-RPC / Telex handler:
-    - Accepts 'weather.get' (and alias 'getWeather') with params.city or free-text query.
-    - Accepts conversational 'message/send' and 'execute' and extracts city/cities from message-like fields.
-    - Falls back to last city via params.context.channel_id.
-    - Normalizes city names (abbr/typos) and optionally standardizes via geocoding/canonical map.
-    """
     body: Optional[Dict[str, Any]] = None
 
     try:
@@ -297,8 +290,13 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 "artifacts": [
                     {
                         "artifactId": _new_id(),
-                        "name": "weather",
-                        "parts": [{"kind": "text", "text": json.dumps(results, ensure_ascii=False)}],
+                        "name": "weatherData",
+                        "parts": [
+                            {
+                                "kind": "data",
+                                "data": results,  # structured batch payload
+                            }
+                        ],
                     }
                 ],
                 "history": [],
@@ -376,9 +374,12 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                 "artifacts": [
                     {
                         "artifactId": _new_id(),
-                        "name": "weather",
+                        "name": "weatherData",
                         "parts": [
-                            {"kind": "text", "text": json.dumps(weather_data, ensure_ascii=False)}
+                            {
+                                "kind": "data",
+                                "data": weather_data,  # structured single-city payload
+                            }
                         ],
                     }
                 ],
@@ -527,10 +528,6 @@ def _explode_multi_place(segment: str) -> List[str]:
     return [p for p in parts if p]
 
 def extract_cities_from_message(message: str) -> List[str]:
-    """
-    Extract multiple plausible cities (preserving order and uniqueness).
-    Applies abbreviation expansion and fuzzy correction.
-    """
     if not message:
         return []
     txt = re.sub(r"<[^>]+>", " ", message).strip()
@@ -588,13 +585,6 @@ def extract_city_from_message(message: str) -> Optional[str]:
     return cities[-1] if cities else None
 
 async def resolve_city_name(candidate: str) -> Optional[str]:
-    """
-    Resolve and standardize city names:
-    - Map abbreviations (NYC -> New York City)
-    - Fuzzy-correct common typos (e.g., 'lagoss' -> 'Lagos')
-    - Use canonical mapping when available (offline-friendly)
-    - Validate/normalize via Open-Meteo geocoding API to return 'Name, Country'
-    """
     if not candidate:
         return None
 
