@@ -266,7 +266,16 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             task_id = _get_task_id(params)
             context_id = channel_id or _generate_context_id()
             message_id = _new_id()
+            user_text = ""
             user_message_id = None
+            incoming_msg = params.get("message") if isinstance(params.get("message"), dict) else {}
+            if isinstance(incoming_msg, dict):
+                parts = incoming_msg.get("parts") or []
+                for p in parts:
+                    if isinstance(p, dict) and p.get("kind") == "text" and isinstance(p.get("text"), str):
+                        user_text = p.get("text") or user_text
+                        break
+                user_message_id = incoming_msg.get("messageId")
 
             telex_message = {
                 "kind": "message",
@@ -380,7 +389,16 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             task_id = _get_task_id(params)
             context_id = channel_id or _generate_context_id()
             message_id = _new_id()
+            user_text = ""
             user_message_id = None
+            incoming_msg = params.get("message") if isinstance(params.get("message"), dict) else {}
+            if isinstance(incoming_msg, dict):
+                parts = incoming_msg.get("parts") or []
+                for p in parts:
+                    if isinstance(p, dict) and p.get("kind") == "text" and isinstance(p.get("text"), str):
+                        user_text = p.get("text") or user_text
+                        break
+                user_message_id = incoming_msg.get("messageId")
 
             telex_message = {
                 "kind": "message",
