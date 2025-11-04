@@ -266,42 +266,45 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
             task_id = _get_task_id(params)
             context_id = channel_id or _generate_context_id()
             message_id = _new_id()
-            agent_part={
-                "kind": "text",
-                "text": human_text,
-                "data": artifacts_data_single if artifacts_data_single else None,
-                "file_url": None,
-            }
+            user_message_id = None
+
             telex_message = {
                 "kind": "message",
                 "role": "agent",
                 "parts": [{"kind": "text", "text": human_text}],
                  "messageId": message_id,
                  "taskId": task_id,
-                 "metadata": None,
+                 "metadata": None
             }
-            artifact = {
-                "artifactId": _new_id(),
-                "name": "weatherData",
-                "parts": [agent_part],
+            agent_part = {
+                "kind": "text",
+                "text": human_text,
+                "data": artifacts_data if artifacts_data else None,
+                "file_url": None,
             }
-               # history: include original user message if available
-            user_text = ""
-            user_message_id = None
-            incoming_msg = params.get("message") if isinstance(params.get("message"), dict) else {}
-            if isinstance(incoming_msg, dict):
-                parts = incoming_msg.get("parts") or []
-                for p in parts:
-                    if isinstance(p, dict) and p.get("kind") == "text" and isinstance(p.get("text"), str):
-                        user_text = p.get("text") or user_text
-                        break
-                user_message_id = incoming_msg.get("messageId")
-
-            history = [
-                {
+            telex_result = {
+                "id": task_id,
+                "contextId": context_id,
+                "status": {
+                    "state": "completed",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "message": telex_message,
+                    
+                },
+                "artifacts": [
+                    {
+                        "artifactId": _new_id(),
+                        "name": "weatherData",
+                        "parts": [{"kind": "text", "text": human_text}],
+                    }
+                ],
+                "history":[
+                       {
                     "kind": "message",
                     "role": "user",
-                    "parts": [{"kind": "text", "text": user_text or "", "data": None, "file_url": None}],
+                    "parts": [
+                        {"kind": "text", "text": "", "data": None, "file_url": None}
+                    ],
                     "messageId": user_message_id,
                     "taskId": None,
                     "metadata": None,
@@ -313,19 +316,12 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                     "messageId": message_id,
                     "taskId": task_id,
                     "metadata": None,
-                },
-            ]
-
-            ts = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
-            telex_result = {
-                "id": task_id,
-                "contextId": context_id,
-                "status": {"state": "completed", "timestamp": ts, "message": telex_message},
-                "artifacts": [artifact],
-                "history": history,
+                   },
+                ],
                 "kind": "task",
             }
             resp = JSONRPCResponse(id=rpc_request.id, result=telex_result)
+
             # If non-blocking, push result to Telex webhook asynchronously
             if not blocking and push_url and push_token:
                 asyncio.create_task(_post_telex_callback(rpc_request.id, telex_result, push_url, push_token))
@@ -377,19 +373,28 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
 
         # Build Telex message + artifact
         human_text = format_telex_text_single(weather_data)
-        artifacts_data_single = to_telex_artifact_single(weather_data)
+        # artifacts_data_single = to_telex_artifact_single(weather_data)
 
         # Telex-style task result for conversational methods
         if method in ("message.send", "execute"):
             task_id = _get_task_id(params)
             context_id = channel_id or _generate_context_id()
             message_id = _new_id()
+            user_message_id = None
+
             telex_message = {
                 "kind": "message",
                 "role": "agent",
                 "parts": [{"kind": "text", "text": human_text}],
                  "messageId": message_id,
-                "taskId": task_id
+                 "taskId": task_id,
+                 "metadata": None
+            }
+            agent_part = {
+                "kind": "text",
+                "text": human_text,
+                "data": artifacts_data if artifacts_data else None,
+                "file_url": None,
             }
             telex_result = {
                 "id": task_id,
@@ -398,6 +403,7 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                     "state": "completed",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "message": telex_message,
+                    
                 },
                 "artifacts": [
                     {
@@ -405,6 +411,26 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
                         "name": "weatherData",
                         "parts": [{"kind": "text", "text": human_text}],
                     }
+                ],
+                "history":[
+                       {
+                    "kind": "message",
+                    "role": "user",
+                    "parts": [
+                        {"kind": "text", "text": "", "data": None, "file_url": None}
+                    ],
+                    "messageId": user_message_id,
+                    "taskId": None,
+                    "metadata": None,
+                },
+                {
+                    "kind": "message",
+                    "role": "agent",
+                    "parts": [agent_part],
+                    "messageId": message_id,
+                    "taskId": task_id,
+                    "metadata": None,
+                   },
                 ],
                 "kind": "task",
             }
@@ -422,12 +448,6 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
         return JSONResponse(status_code=200, content=resp.model_dump())
 
     except Exception as e:
-        # Log full context for debugging (raw body + exception with traceback)
-        try:
-            logger.exception("Unhandled exception while processing A2A request: %s -- body=%r", e, body)
-        except Exception:
-            logger.error("Unhandled exception and failed to log body: %s", e, exc_info=True)
-
         err = create_error_response(
             body.get("id") if isinstance(body, dict) else None,
             JSONRPCError.INTERNAL_ERROR,
@@ -789,32 +809,3 @@ def get_weather_suggestion(temp: Optional[float], weather: str) -> Optional[str]
     if "clear" in wl and temp is not None and 20 <= temp <= 28:
         return "Perfect weather for outdoor activities! 🚶‍♂"
     return None
-
-
-# ============================================================================
-# Telex webhook push (non-blocking)
-# ============================================================================
-
-async def _post_telex_callback(rpc_id: Any, telex_result: Dict[str, Any], url: str, token: str) -> None:
-    """
-    Post the completed task back to Telex when configuration.blocking == false.
-    Sends the same JSON-RPC envelope Telex expects.
-    """
-    payload = {
-        "jsonrpc": "2.0",
-        "id": rpc_id,
-        "result": telex_result,
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.post(url, headers=headers, json=payload)
-            if r.status_code >= 300:
-                logger.warning(f"Telex webhook push failed ({r.status_code}): {r.text}")
-            else:
-                logger.info("Pushed result to Telex webhook (non-blocking).")
-    except Exception as e:
-        logger.error(f"Error pushing Telex webhook: {e}")
