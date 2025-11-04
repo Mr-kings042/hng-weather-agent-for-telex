@@ -416,87 +416,9 @@ async def weather_rest_endpoint(request: Request) -> JSONResponse:
 
             return JSONResponse(status_code=200, content=resp.model_dump())
 
-       # Unified Telex-style task result for all methods (including weather.get)
-       # Build agent part with structured artifact included
-        task_id = _get_task_id(params)
-        context_id = channel_id or _generate_context_id()
-        message_id = _new_id()
-
-        agent_part = {
-            "kind": "text",
-            "text": human_text,
-            "data": artifacts_data_single if artifacts_data_single else None,
-            "file_url": None,
-        }
-
-        telex_message = {
-            "kind": "message",
-                "role": "agent",
-            "parts": [agent_part],
-            "messageId": message_id,
-            "taskId": task_id,
-            "metadata": None,
-                                    }
-
-        artifact = {
-            "artifactId": _new_id(),
-            "name": "weatherData",
-            "parts": [
-                {
-                    "kind": "text",
-                    "text": human_text,
-                    "data": artifacts_data_single if artifacts_data_single else None,
-                    "file_url": None,
-                }
-            ],
-        }
-
-        # history: best-effort capture of incoming user text (may be empty)
-        user_text = ""
-        user_message_id = None
-        incoming_msg = params.get("message") if isinstance(params.get("message"), dict) else {}
-        if isinstance(incoming_msg, dict):
-            parts = incoming_msg.get("parts") or []
-            for p in parts:
-                if isinstance(p, dict) and p.get("kind") == "text" and isinstance(p.get("text"), str):
-                    user_text = p.get("text") or user_text
-                    break
-            user_message_id = incoming_msg.get("messageId")
-
-        history = [
-            {
-                "kind": "message",
-                "role": "user",
-                "parts": [{"kind": "text", "text": user_text or "", "data": None, "file_url": None}],
-                "messageId": user_message_id,
-                "taskId": None,
-                "metadata": None,
-            },
-            {
-                "kind": "message",
-                "role": "agent",
-                "parts": [agent_part],
-                "messageId": message_id,
-                "taskId": task_id,
-                "metadata": None,
-            },
-        ]
-
-        ts = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
-        telex_result = {
-            "id": task_id,
-            "contextId": context_id,
-            "status": {"state": "completed", "timestamp": ts, "message": telex_message},
-            "artifacts": [artifact],
-            "history": history,
-            "kind": "task",
-        }
-
-        resp = JSONRPCResponse(id=rpc_request.id, result=telex_result)
-        # If non-blocking, push result to Telex webhook asynchronously
-        if not blocking and push_url and push_token:
-            asyncio.create_task(_post_telex_callback(rpc_request.id, telex_result, push_url, push_token))
-
+        # Classic result for weather.get (keeps tests passing)
+        result_payload = {"response": format_weather_response(weather_data), "data": weather_data}
+        resp = JSONRPCResponse(id=rpc_request.id, result=result_payload)
         return JSONResponse(status_code=200, content=resp.model_dump())
 
     except Exception as e:
